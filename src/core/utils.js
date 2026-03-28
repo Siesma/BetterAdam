@@ -1,6 +1,6 @@
 // =============================================================
 // core/utils.js
-// Page detection, DOM lifecycle helpers.
+// Page detection, DOM lifecycle helpers, background fetch parser.
 // =============================================================
 
 /** Returns 'dashboard' | 'course' | 'other' based on the URL. */
@@ -27,24 +27,18 @@ function nukePage() {
 }
 
 /**
- * Resolves when `selector` appears in the DOM, or after `timeout` ms.
- * Uses MutationObserver so there's no polling interval.
+ * Fetches a URL silently in the background and returns a parsed Document.
+ * The user never sees this request — it uses their existing session cookies.
+ * Returns null on any network or parse error.
  */
-function waitFor(selector, timeout = 10000) {
-    return new Promise(resolve => {
-        if (document.querySelector(selector)) return resolve();
-        const obs = new MutationObserver(() => {
-            if (document.querySelector(selector)) {
-                obs.disconnect();
-                resolve();
-            }
-        });
-        obs.observe(document.documentElement, {childList: true, subtree: true});
-        setTimeout(() => {
-            obs.disconnect();
-            resolve();
-        }, timeout);
-    });
+async function fetchPage(url) {
+    try {
+        const res = await fetch(url, {credentials: 'include'});
+        if (!res.ok) return null;
+        return new DOMParser().parseFromString(await res.text(), 'text/html');
+    } catch {
+        return null;
+    }
 }
 
 /** Removes the instant-blackout style tag injected at document-start. */

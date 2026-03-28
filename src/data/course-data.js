@@ -1,54 +1,47 @@
 // =============================================================
 // data/course-data.js
-// Extracts structured data from an ilrepositorygui course page.
-//
-// The real ILIAS course page is structured as:
-//   .breadcrumb .crumb a          → breadcrumb trail
-//   h1.il-page-content-header     → course title
-//   #il_center_col .ilContainerBlock  → each named section (Lecture / Exercises / Project…)
-//     .ilContainerBlockHeader h2  → section heading
-//     .ilObjListRow               → one item per row
-//       .ilContainerListItemIcon img[alt]  → type label
-//       .il_ContainerItemTitle a   → item link + name
-//       .il_ItemProperty           → metadata (deadline, file size, date…)
-//   #il_right_col li.il-std-item-container  → Neuigkeiten (news) sidebar
+// Extracts structured data from a course page document.
+// Accepts an optional `doc` parameter so it works on both the
+// live DOM and on documents returned by fetchPage().
 // =============================================================
 
-function getCoursePageData() {
+function getCoursePageData(doc = document) {
     // ── Title ────────────────────────────────────────────────
-    const titleEl = document.querySelector(
+    const titleEl = doc.querySelector(
         'h1.il-page-content-header, h1.ilHeader, h1'
     );
-    const title = titleEl?.innerText?.trim() || document.title || 'Kurs';
+    const title = titleEl ? (titleEl.innerText || titleEl.textContent || '').trim()
+        : (doc.title || 'Kurs');
 
     // ── Breadcrumbs ──────────────────────────────────────────
-    const crumbs = Array.from(document.querySelectorAll('.breadcrumb .crumb a')).map(a => ({
-        text: a.innerText.trim(),
+    const crumbs = Array.from(doc.querySelectorAll('.breadcrumb .crumb a')).map(a => ({
+        text: (a.innerText || a.textContent || '').trim(),
         link: a.href || '',
     })).filter(c => c.text);
 
     // ── Content sections ─────────────────────────────────────
     const sections = [];
-    document.querySelectorAll('#il_center_col .ilContainerBlock').forEach(block => {
-        const heading = block.querySelector('.ilContainerBlockHeader h2')?.innerText?.trim() || '';
+    doc.querySelectorAll('#il_center_col .ilContainerBlock').forEach(block => {
+        const headingEl = block.querySelector('.ilContainerBlockHeader h2');
+        const heading = headingEl ? (headingEl.innerText || headingEl.textContent || '').trim() : '';
         const items = [];
 
         block.querySelectorAll('.ilObjListRow').forEach(row => {
             const a = row.querySelector('.il_ContainerItemTitle a');
             if (!a) return;
-            const label = a.innerText.trim();
+            const label = (a.innerText || a.textContent || '').trim();
             const href = a.href || '';
             if (!label) return;
 
-            // Type from icon alt text (e.g. "Ordner", "Übung", "Datei")
-            const type = row.querySelector('.ilContainerListItemIcon img')?.alt?.trim() || '';
+            const iconImg = row.querySelector('.ilContainerListItemIcon img');
+            const type = iconImg ? (iconImg.alt || '').trim() : '';
 
-            // Extra metadata spans: deadline, file size, modified date, page count…
             const props = Array.from(row.querySelectorAll('.il_ItemProperty'))
-                .map(el => el.innerText.replace(/\s+/g, ' ').trim())
+                .map(el => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim())
                 .filter(Boolean);
 
-            const desc = row.querySelector('.il_Description')?.innerText?.trim() || '';
+            const descEl = row.querySelector('.il_Description');
+            const desc = descEl ? (descEl.innerText || descEl.textContent || '').trim() : '';
 
             items.push({label, href, type, props, desc});
         });
@@ -56,18 +49,17 @@ function getCoursePageData() {
         if (heading || items.length) sections.push({heading, items});
     });
 
-    // ── News sidebar (Neuigkeiten) ───────────────────────────
+    // ── News sidebar ─────────────────────────────────────────
     const news = [];
-    document.querySelectorAll('#il_right_col li.il-std-item-container .il-item').forEach(item => {
+    doc.querySelectorAll('#il_right_col li.il-std-item-container .il-item').forEach(item => {
         const a = item.querySelector('.il-item-title a');
         if (!a) return;
-
-        const label = a.innerText.trim();
-        // Relative hrefs need to be made absolute
-        const href = a.href || (location.origin + '/' + (a.getAttribute('href') || '').replace(/^\//, ''));
-        const desc = item.querySelector('.il-item-description')?.innerText?.trim() || '';
-        const date = item.querySelector('.il-item-property-value')?.innerText?.trim() || '';
-
+        const label = (a.innerText || a.textContent || '').trim();
+        const href = a.href || '';
+        const descEl = item.querySelector('.il-item-description');
+        const desc = descEl ? (descEl.innerText || descEl.textContent || '').trim() : '';
+        const dateEl = item.querySelector('.il-item-property-value');
+        const date = dateEl ? (dateEl.innerText || dateEl.textContent || '').trim() : '';
         news.push({label, href, desc, date});
     });
 

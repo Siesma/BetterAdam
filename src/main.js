@@ -4,21 +4,35 @@
 // @match        https://adam.unibas.ch/*
 // @grant        none
 // @run-at       document-start
-// @require      https://raw.githubusercontent.com/Siesma/BetterAdam/main/core/constants.js
-// @require      https://raw.githubusercontent.com/Siesma/BetterAdam/main/core/utils.js
-// @require      https://raw.githubusercontent.com/Siesma/BetterAdam/main/core/cache.js
-// @require      https://raw.githubusercontent.com/Siesma/BetterAdam/main/data/dashboard-data.js
-// @require      https://raw.githubusercontent.com/Siesma/BetterAdam/main/data/todo-enrichment.js
-// @require      https://raw.githubusercontent.com/Siesma/BetterAdam/main/data/course-data.js
-// @require      https://raw.githubusercontent.com/Siesma/BetterAdam/main/ui/dashboard-ui.js
-// @require      https://raw.githubusercontent.com/Siesma/BetterAdam/main/ui/course-ui.js
+// @require      https://raw.githubusercontent.com/Siesma/BetterAdam/main/src/core/constants.js
+// @require      https://raw.githubusercontent.com/Siesma/BetterAdam/main/src/core/utils.js
+// @require      https://raw.githubusercontent.com/Siesma/BetterAdam/main/src/core/cache.js
+// @require      https://raw.githubusercontent.com/Siesma/BetterAdam/main/src/data/dashboard-data.js
+// @require      https://raw.githubusercontent.com/Siesma/BetterAdam/main/src/data/todo-enrichment.js
+// @require      https://raw.githubusercontent.com/Siesma/BetterAdam/main/src/data/course-data.js
+// @require      https://raw.githubusercontent.com/Siesma/BetterAdam/main/src/ui/dashboard-ui.js
+// @require      https://raw.githubusercontent.com/Siesma/BetterAdam/main/src/ui/course-ui.js
 // ==/UserScript==
 
 /*
-Removes flashbang when attempting to load
-Runs at document-start before any pixel paints.
-All required modules are loaded before this executes.
+  HOW THE CACHING WORKS
+  ─────────────────────
+  On first visit to any page:
+    1. Nothing in cache → wait for background fetch → render → save to cache.
+
+  On every subsequent visit:
+    1. Render from cache INSTANTLY (user sees content immediately, no spinner).
+    2. Simultaneously fire a background fetch() of the same URL.
+    3. Parse the fetched HTML and extract data — the live page never loads visibly.
+    4. Compare fingerprints:
+         • Same  → cache is fresh, do nothing.
+         • Different → show "🔄 Neue Inhalte" banner so user can reload.
+    5. Always save the fresh data to cache for next time.
+
+  The user never sees the ILIAS loading spinner again after the first visit.
 */
+
+// Instant blackout before any pixel paints
 (function injectBlackout() {
     const s = document.createElement('style');
     s.id = 'ilias-blackout';
@@ -30,80 +44,125 @@ All required modules are loaded before this executes.
     const pageType = getPageType();
     const pageUrl = location.href;
 
+    // ── DASHBOARD ─────────────────────────────────────────────
     if (pageType === 'dashboard') {
-
         const cached = cacheLoad(pageUrl);
+
         if (cached?.data) {
+            // ── CACHE HIT: render instantly, fetch in background ──
             buildDashboard(cached.data.courses, cached.data.semesters, cached.data.todos || []);
             removeBlackout();
-        }
 
-        await waitFor('#il_center_col .il-item.il-std-item');
-        const courses = getCourses();
-        const semesters = getSemesters();
-        const todos = getTodos();
+            // Fire background fetch — user is already looking at cached content
+            const freshDoc = await fetchPage(pageUrl);
+            if (freshDoc) {
+                const courses = getCourses(freshDoc);
+                const semesters = getSemesters(freshDoc);
+                const todos = getTodos(freshDoc);
+                const freshFp = dashboardFingerprint(courses);
 
-        if (!cached?.data) {
+                if (freshFp !== cached.fingerprint) {
+                    // Content changed — show banner, re-render with fresh data
+                    buildDashboard(courses, semesters, todos);
+                    showDashboardStaleBanner(document.getElementById('ilias-dark-ui'));
+                }
+
+                cacheSave(pageUrl, {courses, semesters, todos}, freshFp);
+
+                // Still enrich todos even on cache hit
+                if (todos.length) {
+                    const enriched = await enrichTodosWithCourseRef(todos);
+                    const enrichedCourses = attachTodosToCourses(courses, enriched);
+                    enrichedCourses.forEach((ec, i) => {
+                        courses[i] = ec;
+                    });
+                    buildDashboard(courses, semesters, todos);
+                }
+            }
+
+        } else {
+            // ── CACHE MISS: must wait for the live DOM this one time ──
+            // We use the live DOM here because this is the first-ever visit
+            // and there's no cache to show. After this, every visit is instant.
+            await waitFor('#il_center_col .il-item.il-std-item');
+            const courses = getCourses();
+            const semesters = getSemesters();
+            const todos = getTodos();
+
             buildDashboard(courses, semesters, todos);
             removeBlackout();
-        } else {
-            const newFp = dashboardFingerprint(courses);
-            if (newFp !== cached.fingerprint) {
-                showDashboardStaleBanner(document.getElementById('ilias-dark-ui'));
+            cacheSave(pageUrl, {courses, semesters, todos}, dashboardFingerprint(courses));
+
+            if (todos.length) {
+                const enriched = await enrichTodosWithCourseRef(todos);
+                const enrichedCourses = attachTodosToCourses(courses, enriched);
+                enrichedCourses.forEach((ec, i) => {
+                    courses[i] = ec;
+                });
+                buildDashboard(courses, semesters, todos);
+                // Update cache with enriched todo data
+                cacheSave(pageUrl, {courses, semesters, todos}, dashboardFingerprint(courses));
             }
         }
 
-        cacheSave(pageUrl, {courses, semesters, todos}, dashboardFingerprint(courses));
-
-        if (todos.length) {
-            const enriched = await enrichTodosWithCourseRef(todos);
-            const enrichedCourses = attachTodosToCourses(courses, enriched);
-            enrichedCourses.forEach((ec, i) => {
-                courses[i] = ec;
+        // Watch for ILIAS AJAX semester tab switches (they replace the DOM in-place)
+        // Only needed on cache-miss path where ILIAS DOM is still alive
+        if (!cacheLoad(pageUrl)?.data) {
+            let rebuilding = false;
+            const bodyObs = new MutationObserver(() => {
+                if (rebuilding) return;
+                const nc = getCourses();
+                if (nc.length > 0) {
+                    rebuilding = true;
+                    bodyObs.disconnect();
+                    buildDashboard(nc, getSemesters(), getTodos());
+                }
             });
-            buildDashboard(courses, semesters, todos);
-        }
-
-        const bodyObs = new MutationObserver(() => {
-            const nc = getCourses();
-            if (nc.length > 0) {
-                bodyObs.disconnect();
-                buildDashboard(nc, getSemesters(), getTodos());
-            }
-        });
-        if (document.getElementById('ilias-dark-ui')) {
             bodyObs.observe(document.body, {childList: true, subtree: true});
         }
 
+        // ── COURSE PAGE ───────────────────────────────────────────
     } else if (pageType === 'course') {
-
         const cached = cacheLoad(pageUrl);
+
         if (cached?.data) {
+            // ── CACHE HIT: render instantly, fetch in background ──
             buildCoursePage(cached.data, {fromCache: true});
             removeBlackout();
-        }
 
-        await waitFor('#il_center_col .ilContainerBlock, #il_center_col .ilObjListRow, h1');
-        await new Promise(r => setTimeout(r, 150));
+            const freshDoc = await fetchPage(pageUrl);
+            if (freshDoc) {
+                const freshData = getCoursePageData(freshDoc);
+                const freshFp = coursefingerprint(freshData);
 
-        const freshData = getCoursePageData();
-        const freshFp = coursefingerprint(freshData);
+                if (freshFp !== cached.fingerprint) {
+                    // Content changed — re-render and show banner
+                    buildCoursePage(freshData);
+                    showStaleBanner();
+                } else {
+                    // Same content — dismiss the "loading" indicator quietly
+                    const banner = document.getElementById('cache-banner');
+                    if (banner) {
+                        banner.innerHTML = `<span>✓ Inhalte sind aktuell</span>`;
+                        setTimeout(() => banner.remove(), 2000);
+                    }
+                }
 
-        if (!cached?.data) {
+                cacheSave(pageUrl, freshData, freshFp);
+            }
+
+        } else {
+            // ── CACHE MISS: wait for live DOM ──
+            await waitFor('#il_center_col .ilContainerBlock, #il_center_col .ilObjListRow, h1');
+            await new Promise(r => setTimeout(r, 150));
+
+            const freshData = getCoursePageData();
             buildCoursePage(freshData);
             removeBlackout();
-        } else if (freshFp !== cached.fingerprint) {
-            showStaleBanner();
-        } else {
-            const banner = document.getElementById('cache-banner');
-            if (banner) {
-                banner.innerHTML = `<span>✓ Inhalte sind aktuell</span>`;
-                setTimeout(() => banner.remove(), 2000);
-            }
+            cacheSave(pageUrl, freshData, coursefingerprint(freshData));
         }
 
-        cacheSave(pageUrl, freshData, freshFp);
-
+        // ── OTHER (login page etc.) ───────────────────────────────
     } else {
         removeBlackout();
         document.body.style.cssText = '';
