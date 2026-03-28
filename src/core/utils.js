@@ -1,21 +1,22 @@
-// =============================================================
-// core/utils.js
-// Page detection, DOM lifecycle helpers, background fetch parser.
-// =============================================================
+// src/core/utils.js
 
-/** Returns 'dashboard' | 'course' | 'other' based on the URL. */
 function getPageType() {
-    const base = (new URLSearchParams(location.search).get('baseClass') || '').toLowerCase();
-    if (base === 'ildashboardgui') return 'dashboard';
-    if (base === 'ilrepositorygui') return 'course';
+    return getPageTypeFromUrl(location.href);
+}
+
+function getPageTypeFromUrl(url) {
+    try {
+        const base = (new URL(url).searchParams.get('baseClass') || '').toLowerCase();
+        if (base === 'ildashboardgui') return 'dashboard';
+        if (base === 'ilrepositorygui') return 'course';
+        if (/\/go\/(crs|fold|exc|grp)\//.test(url)) return 'course';
+    } catch {
+    }
     return 'other';
 }
 
-/**
- * Wipes all non-script body children, injects a fresh #ilias-dark-ui root div,
- * and returns it. Call once per page render.
- */
 function nukePage() {
+    document.getElementById('ilias-dark-ui')?.remove();
     Array.from(document.body.children).forEach(el => {
         if (el.tagName !== 'SCRIPT' && el.id !== 'ilias-dark-ui') el.remove();
     });
@@ -26,11 +27,6 @@ function nukePage() {
     return root;
 }
 
-/**
- * Fetches a URL silently in the background and returns a parsed Document.
- * The user never sees this request — it uses their existing session cookies.
- * Returns null on any network or parse error.
- */
 async function fetchPage(url) {
     try {
         const res = await fetch(url, {credentials: 'include'});
@@ -41,7 +37,29 @@ async function fetchPage(url) {
     }
 }
 
-/** Removes the instant-blackout style tag injected at document-start. */
+// Works on both live DOM (innerText) and DOMParser docs (textContent only).
+function getText(el) {
+    if (!el) return '';
+    return (typeof el.innerText === 'string' ? el.innerText : el.textContent || '').trim();
+}
+
 function removeBlackout() {
     document.getElementById('ilias-blackout')?.remove();
+}
+
+function waitFor(selector, timeout = 10000) {
+    return new Promise(resolve => {
+        if (document.querySelector(selector)) return resolve();
+        const obs = new MutationObserver(() => {
+            if (document.querySelector(selector)) {
+                obs.disconnect();
+                resolve();
+            }
+        });
+        obs.observe(document.documentElement, {childList: true, subtree: true});
+        setTimeout(() => {
+            obs.disconnect();
+            resolve();
+        }, timeout);
+    });
 }

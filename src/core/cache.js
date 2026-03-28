@@ -1,16 +1,9 @@
-// =============================================================
-// core/cache.js
-// localStorage-based cache for instant re-renders.
-// =============================================================
+// src/core/cache.js
 
-const CACHE_PREFIX = 'ilias_cache_';
-const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 1 week
+const CACHE_PREFIX = 'ba_';
+const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const CACHE_VERSION = 4;
 
-// Bump this number any time the cached data shape changes.
-// All entries with an older version are ignored and evicted.
-const CACHE_VERSION = 3;
-
-/** Stable cache key from URL (strips fragment). */
 function cacheKey(url) {
     try {
         const u = new URL(url);
@@ -20,13 +13,11 @@ function cacheKey(url) {
     }
 }
 
-/** Returns { data, fingerprint, ts } or null if missing/expired/stale-version. */
 function cacheLoad(url) {
     try {
         const raw = localStorage.getItem(cacheKey(url));
         if (!raw) return null;
         const entry = JSON.parse(raw);
-        // Evict if wrong version or expired
         if (entry.v !== CACHE_VERSION || Date.now() - entry.ts > CACHE_TTL_MS) {
             localStorage.removeItem(cacheKey(url));
             return null;
@@ -37,14 +28,12 @@ function cacheLoad(url) {
     }
 }
 
-/** Persists data + fingerprint. Evicts oldest entries on quota errors. */
 function cacheSave(url, data, fp) {
     const value = JSON.stringify({data, fingerprint: fp, ts: Date.now(), v: CACHE_VERSION});
     try {
         localStorage.setItem(cacheKey(url), value);
     } catch {
         try {
-            // Quota exceeded — evict 5 oldest BetterAdam entries and retry
             Object.keys(localStorage)
                 .filter(k => k.startsWith(CACHE_PREFIX))
                 .sort((a, b) => {
@@ -55,24 +44,25 @@ function cacheSave(url, data, fp) {
                 .slice(0, 5)
                 .forEach(k => localStorage.removeItem(k));
             localStorage.setItem(cacheKey(url), value);
-        } catch { /* give up silently */
+        } catch {
         }
     }
 }
 
-/** Wipes every BetterAdam cache entry. Call when data shape changes. */
-function cacheNuke() {
-    Object.keys(localStorage)
-        .filter(k => k.startsWith(CACHE_PREFIX))
-        .forEach(k => localStorage.removeItem(k));
+function cacheNukeOld() {
+    ['ilias_cache_', 'ba_cache_'].forEach(prefix => {
+        Object.keys(localStorage)
+            .filter(k => k.startsWith(prefix))
+            .forEach(k => localStorage.removeItem(k));
+    });
 }
 
-/** Fingerprint of course-page data. */
 function coursefingerprint(data) {
-    return JSON.stringify(data).length + '|' + (data.sections || []).map(s => s.items.length).join(',');
+    return (data.sections || [])
+        .map(s => s.heading + '|' + s.items.map(i => i.label).join(','))
+        .join('\n');
 }
 
-/** Fingerprint of the dashboard course list (ignores todos so todo changes don't force a re-render banner). */
 function dashboardFingerprint(courses) {
-    return courses.map(c => c.id + c.title).join('|');
+    return courses.map(c => c.id + '|' + c.link).join('\n');
 }
