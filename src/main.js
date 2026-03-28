@@ -15,7 +15,6 @@
 // @require      https://raw.githubusercontent.com/Siesma/BetterAdam/main/src/ui/course-ui.js
 // ==/UserScript==
 
-// Instant blackout — runs before any pixel paints
 (function injectBlackout() {
     const s = document.createElement('style');
     s.id = 'ilias-blackout';
@@ -24,6 +23,10 @@
 })();
 
 (async function boot() {
+    // Wipe any cache entries from older versions of the script.
+    // cacheLoad already ignores them, but this frees up space.
+    cacheNuke();   // ← remove this line after one deploy cycle
+
     const pageType = getPageType();
     const pageUrl = location.href;
 
@@ -31,10 +34,9 @@
         const cached = cacheLoad(pageUrl);
 
         if (cached?.data) {
-            // Instant render from cache
+            // Cached courses already have enriched todos attached — render instantly
             buildDashboard(cached.data.courses, cached.data.semesters, cached.data.todos || []);
             removeBlackout();
-            // Install interceptor NOW so all subsequent clicks are instant
             installLinkInterceptor();
 
             // Background refresh
@@ -44,40 +46,35 @@
                 const semesters = getSemesters(freshDoc);
                 const todos = getTodos(freshDoc);
                 const freshFp = dashboardFingerprint(courses);
+
+                // Enrich and attach before saving — so todos are always in cache
+                const enrichedCourses = await enrichAndAttach(courses, todos);
+                cacheSave(pageUrl, {courses: enrichedCourses, semesters, todos}, freshFp);
+
                 if (freshFp !== cached.fingerprint) {
-                    buildDashboard(courses, semesters, todos);
+                    buildDashboard(enrichedCourses, semesters, todos);
                     showDashboardStaleBanner(document.getElementById('ilias-dark-ui'));
-                }
-                cacheSave(pageUrl, {courses, semesters, todos}, freshFp);
-                if (todos.length) {
-                    const enriched = await enrichTodosWithCourseRef(todos);
-                    const enrichedCourses = attachTodosToCourses(courses, enriched);
-                    enrichedCourses.forEach((ec, i) => {
-                        courses[i] = ec;
-                    });
-                    buildDashboard(courses, semesters, todos);
+                } else {
+                    // Re-render silently to update todo sub-rows even when course list unchanged
+                    buildDashboard(enrichedCourses, semesters, todos);
                 }
             }
 
         } else {
-            // First ever visit — wait for ILIAS DOM, extract, render, cache
+            // First visit — wait for live ILIAS DOM
             await waitFor('#il_center_col .il-item.il-std-item');
             const courses = getCourses();
             const semesters = getSemesters();
             const todos = getTodos();
+
+            // Show courses immediately, enrich todos in background
             buildDashboard(courses, semesters, todos);
             removeBlackout();
             installLinkInterceptor();
-            cacheSave(pageUrl, {courses, semesters, todos}, dashboardFingerprint(courses));
-            if (todos.length) {
-                const enriched = await enrichTodosWithCourseRef(todos);
-                const enrichedCourses = attachTodosToCourses(courses, enriched);
-                enrichedCourses.forEach((ec, i) => {
-                    courses[i] = ec;
-                });
-                buildDashboard(courses, semesters, todos);
-                cacheSave(pageUrl, {courses, semesters, todos}, dashboardFingerprint(courses));
-            }
+
+            const enrichedCourses = await enrichAndAttach(courses, todos);
+            buildDashboard(enrichedCourses, semesters, todos);
+            cacheSave(pageUrl, {courses: enrichedCourses, semesters, todos}, dashboardFingerprint(courses));
         }
 
     } else if (pageType === 'course') {
@@ -92,6 +89,8 @@
             if (freshDoc) {
                 const freshData = getCoursePageData(freshDoc);
                 const freshFp = coursefingerprint(freshData);
+                cacheSave(pageUrl, freshData, freshFp);
+
                 if (freshFp !== cached.fingerprint) {
                     buildCoursePage(freshData);
                     showStaleBanner();
@@ -102,7 +101,6 @@
                         setTimeout(() => banner.remove(), 2000);
                     }
                 }
-                cacheSave(pageUrl, freshData, freshFp);
             }
 
         } else {
@@ -116,7 +114,6 @@
         }
 
     } else {
-        // Login page, other pages — restore normal view
         removeBlackout();
         document.body.style.cssText = '';
         document.querySelectorAll('body > *').forEach(el => el.style.visibility = '');
